@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>遠端雲端打卡系統</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- React & Babel -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&display=swap');
+        body { font-family: 'Noto Sans TC', sans-serif; }
+    </style>
+</head>
+<body class="bg-slate-50">
+    <div id="root"></div>
+
+    <!-- Firebase App (Compat SDK for easier script tag integration) -->
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+
+    <script type="text/babel">
+        // 取得環境變數
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
+            apiKey: "",
+            authDomain: "",
+            projectId: "",
+            storageBucket: "",
+            messagingSenderId: "",
+            appId: ""
+        };
+
+        // 初始化 Firebase (使用 Compat 模式以利單一檔案運行)
+        const app = firebase.initializeApp(firebaseConfig);
+        const auth = firebase.auth();
+        const db = firebase.firestore();
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'team-check-in-v1';
+
+        const { useState, useEffect } = React;
+
+        function App() {
+            const [user, setUser] = useState(null);
+            const [records, setRecords] = useState([]);
+            const [members, setMembers] = useState([]);
+            const [nameInput, setNameInput] = useState('');
+            const [statusMsg, setStatusMsg] = useState({ type: '', text: '' });
+            const [loading, setLoading] = useState(true);
+
+            // 認證監聽
+            useEffect(() => {
+                const initAuth = async () => {
+                    try {
+                        // 如果有提供 Token 則使用 Token，否則匿名登入
+                        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                            await auth.signInWithCustomToken(__initial_auth_token);
+                        } else {
+                            await auth.signInAnonymously();
+                        }
+                    } catch (e) {
+                        console.error("Auth Error:", e);
+                    }
+                };
+
+                initAuth();
+                const unsubscribe = auth.onAuthStateChanged((u) => {
+                    setUser(u);
+                    setLoading(false);
+                });
+                return () => unsubscribe();
+            }, []);
+
+            // 資料監聽
+            useEffect(() => {
+                if (!user) return;
+
+                // 監聽打卡紀錄
+                const recordsRef = db.collection('artifacts').doc(appId).collection('public').doc('data').collection('checkInRecords');
+                const unsubRecords = recordsRef.onSnapshot((snap) => {
+                    const data = snap.docs.map(d => ({
+                        id: d.id,
+                        ...d.data(),
+                        timestamp: d.data().timestamp?.toDate() || new Date()
+                    }));
+                    // 根據時間排序 (Rule 2: JS 內過濾與排序)
+                    setRecords(data.sort((a, b) => b.timestamp - a.timestamp));
+                }, (err) => console.error("Firestore Error:", err));
+
+                // 監聽成員清單
+                const membersRef = db.collection('artifacts').doc(appId).collection('public').doc('data').collection('members');
+                const unsubMembers = membersRef.onSnapshot((snap) => {
+                    const list = snap.docs.map(d => d.data().name);
+                    setMembers(Array.from(new Set(["管理員", ...list])).sort());
+                });
+
+                return () => {
+                    unsubRecords();
+                    unsubMembers();
+                };
+            }, [user]);
+
+            const handleAction = async (type) => {
+                if (!user) return;
+                const name = nameInput.trim();
+                if (!name) {
+                    setStatusMsg({ type: 'error', text: '請輸入或選擇姓名' });
+                    return;
+                }
+
+                try {
+                    // 新增紀錄 (Rule 1: 路徑規範)
+                    const recordsRef = db.collection('artifacts').doc(appId).collection('public').doc('data').collection('checkInRecords');
+                    await recordsRef.add({
+                        name,
+                        type,
+                        timestamp: firebase.firestore.FieldValue.serverTimestamp(),
+                        userId: user.uid
+                    });
+
+                    // 如果是新成員則新增到成員表
+                    if (!members.includes(name)) {
+                        const memberDoc = db.collection('artifacts').doc(appId).collection('public').doc('data').collection('members').doc(name);
+                        await memberDoc.set({ name });
+                    }
+
+                    setStatusMsg({ type: 'success', text: `${name} ${type === 'IN' ? '簽到' : '簽退'}成功！` });
+                    setNameInput('');
+                    setTimeout(() => setStatusMsg({ type: '', text: '' }), 3000);
+                } catch (e) {
+                    setStatusMsg({ type: 'error', text: '操作失敗，請稍後再試' });
+                }
+            };
+
+            if (loading) return (
+                <div className="flex h-screen items-center justify-center bg-slate-50">
+                    <div className="text-center">
+                        <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-indigo-600 mx-auto mb-4"></div>
+                        <p className="font-bold text-slate-400">系統載入中...</p>
+                    </div>
+                </div>
+            );
+
+            return (
+                <div className="max-w-md mx-auto min-h-screen p-4 pb-12">
+                    <header className="bg-white rounded-3xl p-6 shadow-sm border border-slate-200 mb-6 flex items-center gap-4">
+                        <div className="bg-indigo-600 p-3 rounded-2xl text-white">
+                            <i data-lucide="clock"></i>
+                        </div>
+                        <div>
+                            <h1 className="text-xl font-black text-slate-800">團隊遠端打卡</h1>
+                            <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Real-time Cloud Sync</p>
+                        </div>
+                    </header>
+
+                    <section className="bg-white rounded-3xl p-8 shadow-xl mb-6 border border-slate-100">
+                        <label className="block text-sm font-bold text-slate-500 mb-3 ml-1">身分識別</label>
+                        <input 
+                            type="text" 
+                            list="members" 
+                            value={nameInput} 
+                            onChange={e => setNameInput(e.target.value)}
+                            placeholder="請輸入或選擇姓名"
+                            className="w-full p-4 rounded-2xl border-2 border-slate-100 mb-6 outline-none focus:border-indigo-500 bg-slate-50/50 font-bold transition-all"
+                        />
+                        <datalist id="members">
+                            {members.map(m => <option key={m} value={m} />)}
+                        </datalist>
+
+                        <div className="grid grid-cols-2 gap-4">
+                            <button 
+                                onClick={() => handleAction('IN')} 
+                                className="flex flex-col items-center gap-2 p-6 bg-indigo-50 text-indigo-700 rounded-3xl font-black text-lg border-2 border-indigo-100 active:scale-95 transition-all hover:bg-indigo-100"
+                            >
+                                <i data-lucide="log-in"></i>
+                                簽到
+                            </button>
+                            <button 
+                                onClick={() => handleAction('OUT')} 
+                                className="flex flex-col items-center gap-2 p-6 bg-rose-50 text-rose-700 rounded-3xl font-black text-lg border-2 border-rose-100 active:scale-95 transition-all hover:bg-rose-100"
+                            >
+                                <i data-lucide="log-out"></i>
+                                簽退
+                            </button>
+                        </div>
+                        
+                        {statusMsg.text && (
+                            <div className={`mt-6 p-4 rounded-2xl text-center text-sm font-bold animate-pulse ${
+                                statusMsg.type === 'success' ? 'bg-emerald-50 text-emerald-600 border border-emerald-100' : 'bg-rose-50 text-rose-600 border border-rose-100'
+                            }`}>
+                                {statusMsg.text}
+                            </div>
+                        )}
+                    </section>
+
+                    <section className="bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden">
+                        <div className="p-4 bg-slate-50 border-b border-slate-200 flex justify-between items-center">
+                            <span className="font-black text-slate-400 text-[10px] tracking-widest uppercase">今日動態回饋</span>
+                            <span className="bg-white px-2 py-0.5 rounded-full text-[10px] font-bold text-slate-400 border border-slate-200">
+                                {records.length} 筆紀錄
+                            </span>
+                        </div>
+                        <div className="max-h-80 overflow-y-auto">
+                            {records.length > 0 ? records.slice(0, 15).map(r => (
+                                <div key={r.id} className="p-5 border-b border-slate-50 flex justify-between items-center hover:bg-slate-50/50 transition-colors">
+                                    <div className="flex flex-col">
+                                        <span className="font-bold text-slate-700">{r.name}</span>
+                                        <span className="text-[10px] text-slate-300 font-medium">
+                                            {r.timestamp.toLocaleDateString('zh-TW')}
+                                        </span>
+                                    </div>
+                                    <div className="flex items-center gap-4">
+                                        <span className={`text-[10px] font-black px-3 py-1.5 rounded-xl ${
+                                            r.type === 'IN' ? 'bg-indigo-100 text-indigo-600' : 'bg-rose-100 text-rose-600'
+                                        }`}>
+                                            {r.type === 'IN' ? '簽到' : '簽退'}
+                                        </span>
+                                        <span className="text-sm font-mono font-black text-slate-600">
+                                            {r.timestamp.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', hour12: false})}
+                                        </span>
+                                    </div>
+                                </div>
+                            )) : (
+                                <div className="p-10 text-center text-slate-300 text-sm font-bold italic">
+                                    目前尚無打卡紀錄
+                                </div>
+                            )}
+                        </div>
+                    </section>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+        
+        // 初始化 Lucide 圖示
+        const timer = setInterval(() => {
+            if (window.lucide) {
+                window.lucide.createIcons();
+                clearInterval(timer);
+            }
+        }, 100);
+    </script>
+</body>
+</html>
